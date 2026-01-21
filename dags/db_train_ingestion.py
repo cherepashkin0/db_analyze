@@ -6,10 +6,11 @@ from datetime import datetime, timedelta
 import sys
 import os
 
+
 # Добавляем путь к скриптам, чтобы Airflow мог их импортировать
 sys.path.append(os.path.join(os.path.dirname(__file__), 'scripts'))
-from train_generator import run_simulation
-from db_real_ingestion import main as run_real_api_ingestion
+# from train_generator import run_simulation
+from db_real_ingestion import main as run_real_ingestion
 
 default_args = {
     'owner': 'airflow',
@@ -31,7 +32,7 @@ with DAG(
 
     ingest_task = PythonOperator(
         task_id='real_api_ingestion',
-        python_callable=run_simulation,
+        python_callable=run_real_ingestion,
     )
 
     ingest_task
