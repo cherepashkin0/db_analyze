@@ -9,6 +9,7 @@ import os
 # Добавляем путь к скриптам, чтобы Airflow мог их импортировать
 sys.path.append(os.path.join(os.path.dirname(__file__), 'scripts'))
 from train_generator import run_simulation
+from db_real_ingestion import main as run_real_api_ingestion
 
 default_args = {
     'owner': 'airflow',
@@ -29,7 +30,7 @@ with DAG(
 ) as dag:
 
     ingest_task = PythonOperator(
-        task_id='simulate_ingestion',
+        task_id='real_api_ingestion',
         python_callable=run_simulation,
     )
 

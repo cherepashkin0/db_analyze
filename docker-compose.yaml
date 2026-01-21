@@ -6,12 +6,16 @@ x-airflow-common: &airflow-common
     - AIRFLOW__CORE__FERNET_KEY=${FERNET_KEY}
     - AIRFLOW__CORE__LOAD_EXAMPLES=False
     - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
-    - _PIP_ADDITIONAL_REQUIREMENTS=lxml xmltodict pandas clickhouse-connect dbt-clickhouse
+    - _PIP_ADDITIONAL_REQUIREMENTS=lxml xmltodict pandas clickhouse-connect dbt-clickhouse aiohttp aiolimiter tenacity
     - _AIRFLOW_WWW_USER_CREATE=true
     - _AIRFLOW_WWW_USER_USERNAME=${AIRFLOW_USERNAME}
     - _AIRFLOW_WWW_USER_PASSWORD=${AIRFLOW_PASSWORD}
     - _AIRFLOW_WWW_USER_ROLE=Admin
     - _AIRFLOW_WWW_USER_EMAIL=admin@example.com
+    - DB_API_KEY=${DB_API_KEY}
+    - DB_CLIENT_ID=${DB_CLIENT_ID}
+    - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+    - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
