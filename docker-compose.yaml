@@ -16,6 +16,10 @@ x-airflow-common: &airflow-common
     - DB_CLIENT_ID=${DB_CLIENT_ID}
     - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
     - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+    - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    # Формат: postgresql://логин:пароль@хост:порт/база
+    - AIRFLOW_CONN_POSTGRES_DEFAULT=postgresql://${PSQL_USER}:${PSQL_PASSWORD}@postgres:5432/${PSQL_DATABASE}    
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -111,7 +115,7 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_HOST=${CLICKHOUSE_HOST}
     command: >
-      sh -c "pip install streamlit clickhouse-connect pandas &&
+      sh -c "pip install streamlit clickhouse-connect pandas plotly &&
              streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
 volumes:
   postgres_data:

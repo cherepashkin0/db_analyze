@@ -1,8 +1,9 @@
+# iris_parser.py
+
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
 def parse_db_xml(xml_string, city_name):
-    """Парсит XML (IRIS format) и возвращает данные для ClickHouse."""
     if not xml_string:
         return []
     
@@ -13,41 +14,66 @@ def parse_db_xml(xml_string, city_name):
         return []
 
     records = []
-    # В формате fchg (changes) нас интересуют узлы <s> (stations)
+    
     for s in root.findall(".//s"):
-        train_id = s.attrib.get('id', 'unknown')
-        # Ищем изменения в прибытии (ar) или отправлении (dp)
+        # 1. ID и Тип
+        raw_id = s.attrib.get('id', 'unknown')
+        tl = s.find("tl")
+        train_type = tl.attrib.get('c', 'Train') if tl is not None else "Train"
+        train_number = tl.attrib.get('n', '') if tl is not None else ""
+        
+        full_train_id = f"{train_type} {train_number}".strip() or raw_id
+
+        # 2. Поиск времени и статуса отмены
+        # ar = arrival (прибытие), dp = departure (отправление)
         ar = s.find("ar")
         dp = s.find("dp")
         
-        # Берем актуальное время изменения (ct - changed time)
-        # Формат времени в DB: YYMMDDHHMM (например 2601211330)
-        changed_time_str = None
-        planned_time_str = None
+        # Предпочитаем отправление (dp), если это не конечная станция
+        target_node = dp if dp is not None else ar
         
-        if ar is not None and 'ct' in ar.attrib and 'pt' in ar.attrib:
-            changed_time_str = ar.attrib['ct']
-            planned_time_str = ar.attrib['pt']
-        elif dp is not None and 'ct' in dp.attrib and 'pt' in dp.attrib:
-            changed_time_str = dp.attrib['ct']
-            planned_time_str = dp.attrib['pt']
+        # По умолчанию поезд не отменен
+        is_cancelled = 0
+        
+        # В IRIS 'cs' или 'cp' со значением 'c' означает отмену
+        if target_node is not None:
+            # Проверяем атрибуты отмены (cs - cancelled stop, cp - cancelled platform)
+            if target_node.attrib.get('cs') == 'c' or target_node.attrib.get('cp') == 'c':
+                is_cancelled = 1
+            
+            # Также статус может быть в родительском теге <s>
+            if s.attrib.get('bs') == 'c': # bs - busy status (иногда используется для отмен)
+                 is_cancelled = 1
 
-        if changed_time_str and planned_time_str:
-            fmt = "%y%m%d%H%M"
-            try:
-                dt_planned = datetime.strptime(planned_time_str, fmt)
-                dt_actual = datetime.strptime(changed_time_str, fmt)
-                delay = int((dt_actual - dt_planned).total_seconds() / 60)
-                
-                # Ограничимся положительными задержками для статистики
-                delay = max(0, delay)
-                
-                records.append([
-                    datetime.now(), # Текущий момент (timestamp вставки)
-                    city_name,
-                    train_id.split()[0], # Например: ICE, RE, S
-                    delay
-                ])
-            except ValueError:
-                continue
+            pt_str = target_node.attrib.get('pt')
+            ct_str = target_node.attrib.get('ct')
+            
+            # Если поезд отменен, ct (changed time) часто нет. Берем плановое.
+            if not ct_str:
+                ct_str = pt_str
+
+            if pt_str and ct_str:
+                try:
+                    fmt = "%y%m%d%H%M"
+                    dt_planned = datetime.strptime(pt_str, fmt)
+                    dt_actual = datetime.strptime(ct_str, fmt)
+                    
+                    delay = int((dt_actual - dt_planned).total_seconds() / 60)
+                    
+                    # Если поезд отменен, задержка не имеет смысла (или можно ставить 0)
+                    if is_cancelled:
+                        delay = 0
+
+                    records.append([
+                        datetime.now(),
+                        city_name,
+                        train_type,
+                        full_train_id,
+                        dt_planned,
+                        dt_actual,
+                        max(0, delay),
+                        is_cancelled  # <--- НОВОЕ ПОЛЕ
+                    ])
+                except (ValueError, TypeError):
+                    continue
     return records
