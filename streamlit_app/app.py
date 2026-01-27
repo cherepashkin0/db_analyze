@@ -5,10 +5,10 @@ import os
 import plotly.express as px
 from datetime import datetime, timedelta
 
-# 1. Настройка страницы
+# 1. Page configuration
 st.set_page_config(page_title="DB Punctuality Tracker", layout="wide")
 
-# 2. Настройки подключения
+# 2. Connection settings
 CH_HOST = os.getenv('CLICKHOUSE_HOST', 'clickhouse')
 CH_USER = os.getenv('CLICKHOUSE_USER', 'default')
 CH_PASS = os.getenv('CLICKHOUSE_PASSWORD')
@@ -21,7 +21,7 @@ def get_clickhouse_client():
 
 client = get_clickhouse_client()
 
-# --- Вспомогательные функции ---
+# --- Helper functions ---
 def get_available_cities():
     try:
         df = client.query_df("SELECT DISTINCT city FROM train_delays ORDER BY city")
@@ -40,29 +40,29 @@ def get_available_train_types(city_name):
 
 # --- UI ---
 st.title("🚆 DB Punctuality Index")
-st.write("Данные загружаются напрямую из ClickHouse. Показаны только поезда с задержкой > 0 мин.")
+st.write("Data is loaded directly from ClickHouse. Only trains with delay > 0 min are shown.")
 
-# --- Сайдбар ---
-st.sidebar.header("Фильтры")
+# --- Sidebar ---
+st.sidebar.header("Filters")
 available_cities = get_available_cities()
-city = st.sidebar.selectbox("Выберите город", available_cities)
+city = st.sidebar.selectbox("Select city", available_cities)
 
-# Получаем все типы
+# Get all types
 train_types_list = get_available_train_types(city)
 
-# Выбираем ВСЕ типы по умолчанию
+# Select ALL types by default
 selected_types = st.sidebar.multiselect(
-    "Типы поездов", 
+    "Train types", 
     train_types_list, 
     default=train_types_list
 )
 
 if not selected_types:
-    st.warning("Выберите хотя бы один тип поезда.")
+    st.warning("Please select at least one train type.")
     st.stop()
 
-# 4. Основной запрос данных
-# Исправлен синтаксис для ClickHouse: subtractHours() или INTERVAL
+# 4. Main data query
+# Fixed syntax for ClickHouse: subtractHours() or INTERVAL
 query_analytics = f"""
 SELECT
     actual_departure,
@@ -78,23 +78,23 @@ WHERE city = '{city}'
 ORDER BY actual_departure ASC
 """
 
-# === ЗАГРУЗКА И ОТОБРАЖЕНИЕ ===
+# === LOAD AND DISPLAY ===
 try:
     df_raw = client.query_df(query_analytics)
 
     if not df_raw.empty:
-        # Удаляем дубликаты
+        # Remove duplicates
         df_raw = df_raw.drop_duplicates(subset=['train_id', 'actual_departure'], keep='first')
         
-        # --- ФИЛЬТРАЦИЯ ---
+        # --- FILTERING ---
         df_analytics = df_raw[df_raw['delay_in_min'] > 0].copy()
 
         if df_analytics.empty:
-            st.success(f"В городе {city} за последние 24 часа не найдено задержек (среди выбранных типов).")
+            st.success(f"No delays found in {city} in the last 24 hours (among selected types).")
             st.stop()
         
-        # --- 1. БЛОК KPI (Метрики) ---
-        st.subheader("📈 Статистика по опозданиям (24ч)")
+        # --- 1. KPI BLOCK (Metrics) ---
+        st.subheader("📈 Delay Statistics (24h)")
         
         total_delayed_trains = len(df_analytics)
         avg_delay = df_analytics['delay_in_min'].mean()
@@ -102,17 +102,17 @@ try:
         max_delay = df_analytics['delay_in_min'].max()
         
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("Опоздавших поездов", total_delayed_trains)
-        kpi2.metric("Среднее опоздание", f"{avg_delay:.1f} мин")
-        kpi3.metric("Медианное опоздание", f"{median_delay:.1f} мин")
-        kpi4.metric("Максимальное опоздание", f"{max_delay:.0f} мин")
+        kpi1.metric("Delayed trains", total_delayed_trains)
+        kpi2.metric("Average delay", f"{avg_delay:.1f} min")
+        kpi3.metric("Median delay", f"{median_delay:.1f} min")
+        kpi4.metric("Maximum delay", f"{max_delay:.0f} min")
         
         st.divider() 
 
-        # --- 2. График разброса (Точки) ---
-        st.subheader(f"📊 Хронология задержек в {city}")
+        # --- 2. Scatter plot (Points) ---
+        st.subheader(f"📊 Delay Timeline in {city}")
         
-        # Конвертируем datetime в pandas datetime для корректной работы с Plotly
+        # Convert datetime to pandas datetime for correct Plotly handling
         df_analytics['actual_departure'] = pd.to_datetime(df_analytics['actual_departure'])
         
         fig_scatter = px.scatter(
@@ -120,24 +120,24 @@ try:
             x="actual_departure", 
             y="delay_in_min", 
             color="train_type",
-            title="Каждая точка — один опоздавший поезд",
-            labels={"actual_departure": "Время отправления", "delay_in_min": "Задержка (мин)"},
+            title="Each point represents one delayed train",
+            labels={"actual_departure": "Departure time", "delay_in_min": "Delay (min)"},
             hover_data=["train_id", "origin", "destination"]
         )
         
-        # Линии времени - конвертируем в timestamp
+        # Time lines - convert to timestamp
         now = pd.Timestamp.now()
-        midnight = now.normalize()  # Полночь текущего дня
+        midnight = now.normalize()  # Midnight of current day
         
-        fig_scatter.add_vline(x=now.value, line_color="red", line_dash="solid", annotation_text="Сейчас")
+        fig_scatter.add_vline(x=now.value, line_color="red", line_dash="solid", annotation_text="Now")
         
         if df_analytics['actual_departure'].min() < midnight:
             fig_scatter.add_vline(x=midnight.value, line_color="gray", line_dash="dash", annotation_text="00:00")
         
         st.plotly_chart(fig_scatter, use_container_width=True)
 
-        # --- 3. Статистические графики ---
-        st.subheader("📉 Анализ распределения")
+        # --- 3. Statistical charts ---
+        st.subheader("📉 Distribution Analysis")
         col_hist, col_box = st.columns(2)
 
         with col_hist:
@@ -145,11 +145,11 @@ try:
                 df_analytics, 
                 x="delay_in_min", 
                 nbins=30,
-                title="Гистограмма задержек",
-                labels={"delay_in_min": "Минут задержки"},
+                title="Delay Histogram",
+                labels={"delay_in_min": "Delay (minutes)"},
                 color_discrete_sequence=['#EF553B']
             )
-            fig_hist.update_layout(yaxis_title="Количество поездов")
+            fig_hist.update_layout(yaxis_title="Number of trains")
             st.plotly_chart(fig_hist, use_container_width=True)
 
         with col_box:
@@ -158,13 +158,13 @@ try:
                 x="train_type", 
                 y="delay_in_min", 
                 color="train_type",
-                title="Boxplot задержек по типам",
-                labels={"train_type": "Тип", "delay_in_min": "Задержка (мин)"}
+                title="Delay Boxplot by Type",
+                labels={"train_type": "Type", "delay_in_min": "Delay (min)"}
             )
             st.plotly_chart(fig_box, use_container_width=True)
 
-        # --- 4. Детальная таблица ---
-        with st.expander("🔎 Детальные данные (последние 50 записей)"):
+        # --- 4. Detailed table ---
+        with st.expander("🔎 Detailed Data (last 50 records)"):
             detailed_query = f"""
                 SELECT 
                     train_id, 
@@ -184,9 +184,9 @@ try:
             st.dataframe(client.query_df(detailed_query))
             
     else:
-        st.info(f"Данных по городу {city} за последние 24 часа нет.")
+        st.info(f"No data for {city} in the last 24 hours.")
 
 except Exception as e:
-    st.error(f"Ошибка в приложении: {e}")
+    st.error(f"Application error: {e}")
     import traceback
     st.code(traceback.format_exc())
