@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -25,24 +25,103 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
+# --- КОНФИГУРАЦИЯ API ---
+BASE_URL = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
+
 
 def extract_api_name(url: str) -> str:
     """Extract the API name from a URL."""
     prefix = "https://apis.deutschebahn.com/db-api-marketplace/apis/"
-
-    # Remove query parameters if present
     url_without_params = url.split("?")[0]
 
-    # Remove the prefix if present
     if url_without_params.startswith(prefix):
-        path = url_without_params[len(prefix) :]
-        # Split by "/" and take the first three parts
+        path = url_without_params[len(prefix):]
         parts = path.split("/")
         if len(parts) >= 3:
             return "/".join(parts[:3])
 
-    # Fallback: use the whole URL
     return url
+
+
+def generate_plan_queries(
+    stations: dict[str, str],
+    hours_back: int = 24,
+    hours_forward: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Генерирует список запросов к /plan endpoint для всех станций и часов.
+    
+    Args:
+        stations: dict {eva_id: station_name}
+        hours_back: сколько часов назад запрашивать (default: 24)
+        hours_forward: сколько часов вперёд запрашивать (default: 0)
+    
+    Returns:
+        Список query dicts для fetch_and_save()
+    
+    API endpoint: /plan/{evaNo}/{YYMMDD}/{HH}
+    - evaNo: EVA station number (e.g., 8011160 for Berlin Hbf)
+    - YYMMDD: date in format YYMMDD (e.g., 250128 for 2025-01-28)
+    - HH: hour in format HH (e.g., 14 for 2 PM)
+    """
+    queries = []
+    now = datetime.now()
+    
+    # Генерируем временные слоты
+    start_time = now - timedelta(hours=hours_back)
+    end_time = now + timedelta(hours=hours_forward)
+    
+    current = start_time.replace(minute=0, second=0, microsecond=0)
+    
+    while current <= end_time:
+        date_str = current.strftime("%y%m%d")  # YYMMDD format
+        hour_str = current.strftime("%H")       # HH format
+        
+        for eva_id, station_name in stations.items():
+            url = f"{BASE_URL}/plan/{eva_id}/{date_str}/{hour_str}"
+            queries.append({
+                "url": url,
+                "meta": {
+                    "eva_id": eva_id,
+                    "station_name": station_name,
+                    "date": current.strftime("%Y-%m-%d"),
+                    "hour": int(hour_str),
+                    "query_type": "plan",
+                }
+            })
+        
+        current += timedelta(hours=1)
+    
+    logger.info(f"Generated {len(queries)} plan queries for {len(stations)} stations over {hours_back + hours_forward + 1} hours")
+    return queries
+
+
+def generate_fchg_queries(stations: dict[str, str]) -> list[dict[str, Any]]:
+    """
+    Генерирует запросы к /fchg endpoint (full changes) для всех станций.
+    Используется для получения актуальных изменений (опоздания, отмены).
+    
+    Args:
+        stations: dict {eva_id: station_name}
+    
+    Returns:
+        Список query dicts для fetch_and_save()
+    """
+    queries = []
+    
+    for eva_id, station_name in stations.items():
+        url = f"{BASE_URL}/fchg/{eva_id}"
+        queries.append({
+            "url": url,
+            "meta": {
+                "eva_id": eva_id,
+                "station_name": station_name,
+                "query_type": "fchg",
+            }
+        })
+    
+    logger.info(f"Generated {len(queries)} fchg queries for {len(stations)} stations")
+    return queries
 
 
 @dataclass
@@ -53,6 +132,7 @@ class QueryResult:
     url: str
     api_name: str
     query_params: dict[str, Any]
+    meta: dict[str, Any]  # Добавляем метаданные
     response_data: str | None
     status_code: int | None
     error: str | None
@@ -80,13 +160,9 @@ class _DBApiClient:
         self.timeout = timeout
         self.retry_on_status = (429, 500, 502, 503, 504)
 
-        # Rate limiter: convert requests per minute to requests per second
         self.rate_limiter = AsyncLimiter(rate_limit, 60)
-
-        # Semaphore for concurrency control
         self.semaphore = asyncio.Semaphore(max_concurrent)
 
-        # Statistics
         self.stats = {
             "total_requests": 0,
             "successful_requests": 0,
@@ -138,11 +214,10 @@ class _DBApiClient:
         show_progress: bool,
     ) -> QueryResult:
         """Fetch a single query with rate limiting, concurrency control, and retries."""
-        # Extract URL and params from query dict
         url = query["url"]
         params = query.get("params")
+        meta = query.get("meta", {})
 
-        # Build full URL with query parameters if provided
         if params:
             url = f"{url}?{urlencode(params)}"
             query_params = params
@@ -150,10 +225,9 @@ class _DBApiClient:
             query_params = {}
 
         api_name = extract_api_name(url)
-        overall_start_time = asyncio.get_event_loop().time()
 
-        async with self.semaphore:  # Control concurrency
-            async with self.rate_limiter:  # Control rate
+        async with self.semaphore:
+            async with self.rate_limiter:
                 start_time = asyncio.get_event_loop().time()
 
                 try:
@@ -162,10 +236,9 @@ class _DBApiClient:
 
                     self.stats["successful_requests"] += 1
 
-                    if show_progress and (idx + 1) % 100 == 0:
-                        elapsed = asyncio.get_event_loop().time() - overall_start_time
+                    if show_progress and (idx + 1) % 50 == 0:
                         logger.info(
-                            f"Progress: {idx + 1}/{self.stats['total_requests']} queries completed (elapsed: {elapsed:.2f}s)"
+                            f"Progress: {idx + 1}/{self.stats['total_requests']} queries completed"
                         )
 
                     return QueryResult(
@@ -173,6 +246,7 @@ class _DBApiClient:
                         url=url,
                         api_name=api_name,
                         query_params=query_params,
+                        meta=meta,
                         response_data=result["data"],
                         status_code=result["status"],
                         error=None,
@@ -190,6 +264,7 @@ class _DBApiClient:
                         url=url,
                         api_name=api_name,
                         query_params=query_params,
+                        meta=meta,
                         response_data=None,
                         status_code=None,
                         error=str(e),
@@ -211,12 +286,10 @@ class _DBApiClient:
         )
         async def _fetch():
             async with session.get(url) as response:
-                # Retry on specific status codes
                 if response.status in self.retry_on_status:
                     self.stats["retried_requests"] += 1
                     raise aiohttp.ClientError(f"HTTP {response.status}: retrying")
 
-                # Raise for other error status codes
                 response.raise_for_status()
 
                 data = await response.text()
@@ -229,25 +302,30 @@ def _results_to_dataframe(results: list[QueryResult]) -> pd.DataFrame:
     """Convert a list of QueryResult objects to a pandas DataFrame."""
     data = []
     for result in results:
-        data.append(
-            {
-                "timestamp": result.timestamp,
-                "url": result.url,
-                "api_name": result.api_name,
-                "query_params": json.dumps(result.query_params) if result.query_params else None,
-                "response_data": result.response_data,
-                "status_code": str(result.status_code) if result.status_code is not None else None,
-                "error": result.error,
-                "duration_ms": result.duration_ms,
-                "year": result.timestamp.year,
-                "month": result.timestamp.month,
-                "day": result.timestamp.day,
-            }
-        )
+        row = {
+            "timestamp": result.timestamp,
+            "url": result.url,
+            "api_name": result.api_name,
+            "query_params": json.dumps(result.query_params) if result.query_params else None,
+            "response_data": result.response_data,
+            "status_code": str(result.status_code) if result.status_code is not None else None,
+            "error": result.error,
+            "duration_ms": result.duration_ms,
+            "year": result.timestamp.year,
+            "month": result.timestamp.month,
+            "day": result.timestamp.day,
+        }
+        # Добавляем meta поля
+        row["eva_id"] = result.meta.get("eva_id")
+        row["station_name"] = result.meta.get("station_name")
+        row["query_type"] = result.meta.get("query_type")
+        row["query_date"] = result.meta.get("date")
+        row["query_hour"] = result.meta.get("hour")
+        
+        data.append(row)
 
     df = pd.DataFrame(data)
 
-    # Ensure proper data types
     if not df.empty:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df["duration_ms"] = df["duration_ms"].astype("float64")
@@ -283,6 +361,11 @@ def _save_to_parquet(
             ("year", pa.int32()),
             ("month", pa.int32()),
             ("day", pa.int32()),
+            ("eva_id", pa.string()),
+            ("station_name", pa.string()),
+            ("query_type", pa.string()),
+            ("query_date", pa.string()),
+            ("query_hour", pa.int32()),
         ]
     )
 
@@ -291,21 +374,30 @@ def _save_to_parquet(
         partition_dir.mkdir(parents=True, exist_ok=True)
 
         partition_file = partition_dir / parquet_filename
-
-        # Convert partition to PyArrow Table with fixed schema
-        table = pa.Table.from_pandas(partition_df, schema=schema)
+        table = pa.Table.from_pandas(partition_df, schema=schema, preserve_index=False)
 
         if partition_file.exists():
-            # Read existing data
-            parquet_file = pq.ParquetFile(partition_file)
-            existing_table = parquet_file.read()
-            # Concatenate with new data (schemas are now guaranteed to match)
-            combined_table = pa.concat_tables([existing_table, table])
-            # Write back
-            pq.write_table(combined_table, partition_file)
-            logger.info(f"Appended {len(partition_df)} results to {partition_file}")
+            try:
+                parquet_file = pq.ParquetFile(partition_file)
+                existing_table = parquet_file.read()
+                
+                # Проверяем совпадение схем
+                if existing_table.schema != table.schema:
+                    logger.warning(f"Schema mismatch in {partition_file}. Old file will be replaced.")
+                    # Удаляем старый файл со старой схемой
+                    partition_file.unlink()
+                    pq.write_table(table, partition_file)
+                    logger.info(f"Replaced {partition_file} with new schema ({len(partition_df)} rows)")
+                else:
+                    combined_table = pa.concat_tables([existing_table, table])
+                    pq.write_table(combined_table, partition_file)
+                    logger.info(f"Appended {len(partition_df)} results to {partition_file}")
+                    
+            except Exception as e:
+                logger.warning(f"Error reading existing file {partition_file}: {e}. Replacing it.")
+                partition_file.unlink()
+                pq.write_table(table, partition_file)
         else:
-            # Create new file
             pq.write_table(table, partition_file)
             logger.info(f"Created new partition at {partition_file} with {len(partition_df)} results")
 
@@ -322,34 +414,16 @@ async def fetch_and_save(
     """
     Fetch Deutsche Bahn API queries, save to partitioned Parquet, and return as DataFrame.
 
-    This is the main function that handles everything: fetching API data with concurrency control,
-    rate limiting, and retries, then saving to a partitioned Parquet dataset and returning the results.
-
     Args:
-        queries: List of query dicts, where each dict contains:
-            - url: str - The API endpoint URL
-            - params: dict[str, Any] | None - Optional query parameters
+        queries: List of query dicts from generate_plan_queries() or generate_fchg_queries()
         output_path: Base directory path for the partitioned parquet dataset
-        max_concurrent: Maximum number of concurrent requests (default: 50)
+        max_concurrent: Maximum number of concurrent requests (default: 30)
         rate_limit: Maximum requests per minute (default: 60)
         max_retries: Number of retry attempts for failed requests (default: 5)
         timeout: Request timeout in seconds (default: 15)
 
     Returns:
-        DataFrame with columns: timestamp, url, api_name, query_params, response_data,
-                                status_code, error, duration_ms, year, month, day
-
-    Example:
-        >>> queries = [
-        ...     {"url": "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/station/8000105"},
-        ...     {"url": "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/station/8000191"},
-        ... ]
-        >>> df = await fetch_and_save(
-        ...     queries=queries,
-        ...     api_key="your_api_key",
-        ...     client_id="your_client_id",
-        ...     output_path="data/timetables"
-        ... )
+        DataFrame with all results including metadata
     """
     load_dotenv()
 
@@ -359,7 +433,6 @@ async def fetch_and_save(
     if not api_key or not client_id:
         raise ValueError("DB_API_KEY and DB_CLIENT_ID environment variables must be set")
 
-    # Create client and fetch all queries
     client = _DBApiClient(
         api_key=api_key,
         client_id=client_id,
@@ -373,3 +446,40 @@ async def fetch_and_save(
     df = _results_to_dataframe(results)
     _save_to_parquet(df, output_path, parquet_filename)
     return df
+
+
+# --- CONVENIENCE FUNCTION ---
+async def fetch_all_planned_trains(
+    stations: dict[str, str],
+    output_path: str | Path,
+    hours_back: int = 24,
+    hours_forward: int = 0,
+    max_concurrent: int = 30,
+    rate_limit: int = 60,
+) -> pd.DataFrame:
+    """
+    Удобная функция для загрузки ВСЕХ запланированных поездов.
+    
+    Args:
+        stations: dict {eva_id: station_name}, например {"8011160": "Berlin Hbf"}
+        output_path: путь для сохранения parquet
+        hours_back: часов назад (default: 24)
+        hours_forward: часов вперёд (default: 0)
+        max_concurrent: параллельных запросов
+        rate_limit: запросов в минуту
+    
+    Returns:
+        DataFrame с результатами
+    
+    Example:
+        >>> stations = {"8011160": "Berlin Hbf", "8000105": "Frankfurt Hbf"}
+        >>> df = await fetch_all_planned_trains(stations, "data/planned", hours_back=24)
+    """
+    queries = generate_plan_queries(stations, hours_back, hours_forward)
+    
+    return await fetch_and_save(
+        queries=queries,
+        output_path=output_path,
+        max_concurrent=max_concurrent,
+        rate_limit=rate_limit,
+    )

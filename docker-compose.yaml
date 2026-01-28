@@ -1,3 +1,5 @@
+version: '3.8'
+
 x-airflow-common: &airflow-common
   image: apache/airflow:2.7.1-python3.10
   environment:
@@ -18,20 +20,20 @@ x-airflow-common: &airflow-common
     - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
     - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
     - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-    # Формат: postgresql://логин:пароль@хост:порт/база
-    - AIRFLOW_CONN_POSTGRES_DEFAULT=postgresql://${PSQL_USER}:${PSQL_PASSWORD}@postgres:5432/${PSQL_DATABASE}    
+    - AIRFLOW_CONN_POSTGRES_DEFAULT=postgresql://${PSQL_USER}:${PSQL_PASSWORD}@postgres:5432/${PSQL_DATABASE}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
     - ./dbt:/opt/airflow/dbt
+    - /mnt/HC_Volume_104041405/airflow_data:/opt/airflow/data
   user: "${AIRFLOW_UID:-1000}:0"
   depends_on:
     postgres:
       condition: service_healthy
 
 services:
-  # --- База данных ---
+  # --- База данных (Metadata) ---
   postgres:
     image: postgres:13
     environment:
@@ -39,14 +41,14 @@ services:
       - POSTGRES_PASSWORD=${PSQL_PASSWORD}
       - POSTGRES_DB=${PSQL_DATABASE}
     volumes:
-      - postgres_data:/var/lib/postgresql/data # Данные БД не пропадут после выключения
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U airflow"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # --- Инициализация (создает БД и юзера) ---
+  # --- Инициализация ---
   airflow-init:
     <<: *airflow-common
     command: >
@@ -82,6 +84,7 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+    # volume для data мы убрали отсюда, так как перенесли его в *airflow-common (см. выше)
 
   # --- ClickHouse ---
   clickhouse:
@@ -94,7 +97,7 @@ services:
       - "8123:8123"
       - "9000:9000"
     volumes:
-      - ./clickhouse_data:/var/lib/clickhouse
+      - /mnt/HC_Volume_104041405/clickhouse_data:/var/lib/clickhouse
     ulimits:
       nofile:
         soft: 262144
@@ -117,5 +120,6 @@ services:
     command: >
       sh -c "pip install streamlit clickhouse-connect pandas plotly &&
              streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
+
 volumes:
   postgres_data:

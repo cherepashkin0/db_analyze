@@ -27,8 +27,8 @@ default_args = {
 with DAG(
     'db_train_simulation',
     default_args=default_args,
-    description='Симуляция подкачки данных DB каждые 10 минут',
-    schedule_interval=timedelta(minutes=10), # Интервал запуска
+    description='Loading DB data every 20 minutes',
+    schedule_interval=timedelta(minutes=20), # Интервал запуска
     catchup=False # Не запускать за прошлые периоды
 ) as dag:
 
